@@ -152,6 +152,87 @@ No modo por ticks, cada ciclo abre a janela, envia heartbeats, espera os eventos
 
 No modo por turnos, o simulador fornece o pacote com navios, economia e eventos; o cliente gera as decisoes e as envia em lote. As regras deterministicas em `agentes/politicas.py` sao compartilhadas pelos dois modos.
 
+### Fluxo de entrada
+
+Este diagrama mostra como a execucao parte de `python -m agentes` e e encaminhada para o modo escolhido:
+
+```mermaid
+flowchart TD
+    A["python -m agentes"] --> B["agentes/__main__.py"]
+    B --> C["orquestrador.main()"]
+    C --> D["Carrega .env e interpreta argumentos"]
+    D --> E{"--modo-turnos?"}
+    E -- "nao" --> T["Modo por ticks"]
+    E -- "sim" --> U["rodada_turnos.executar()"]
+    T --> V["Cliente HTTP + canal de eventos"]
+    U --> W["ClienteTurnos: setup / pack / submit"]
+    V --> X["Resultado por ticks"]
+    W --> Y["Resultado por turnos"]
+```
+
+### Fluxo detalhado: modo por ticks
+
+```mermaid
+flowchart TD
+    A["Verifica saude e estado do simulador"] --> B{"Rodada nova, retomar ou reiniciar?"}
+    B --> C["Configura agentes e abre canal"]
+    C --> D["Abre tick"]
+    D --> E["Envia heartbeats em paralelo"]
+    E --> F["Le estado e eventos"]
+    F --> G{"Canal entregou eventos no prazo?"}
+    G -- "nao" --> H["Busca eventos via REST"]
+    G -- "sim" --> I["Usa eventos recebidos"]
+    H --> J["Detecta tempestade e calcula propostas"]
+    I --> J
+    J --> K["politicas.propor(): seguranca > economia > navegacao"]
+    K --> L["Envia proposta ao simulador"]
+    L --> M["politicas.revisar() e envia revisao cruzada"]
+    M --> N{"Revisao aprovada?"}
+    N -- "nao" --> O["Registra veto"]
+    N -- "sim" --> P["Envia comando"]
+    O --> Q["Fecha tick"]
+    P --> Q
+    Q --> R{"Chegou ao tick final?"}
+    R -- "nao" --> D
+    R -- "sim" --> S["Finaliza rodada e salva resultado JSON"]
+```
+
+### Fluxo detalhado: modo por turnos e LLM
+
+```mermaid
+flowchart TD
+    A["Verifica saude e estado"] --> B["Configura agentes ou retoma"]
+    B --> C["GET /api/v1/turn/pack"]
+    C --> D["Calcula propostas deterministicas de referencia"]
+    D --> E{"--llm habilitado e turno relevante?"}
+    E -- "nao" --> F["Usa politica deterministica"]
+    E -- "sim" --> G["Groq propoe acoes"]
+    G --> H["Normaliza resposta JSON e valida formato"]
+    H --> I["Portoes deterministas: estado, tempestade, prazo, combustivel"]
+    I --> J{"Proposta passou nos portoes?"}
+    J -- "nao" --> K["Usa fallback deterministico"]
+    J -- "sim" --> L{"Precisa de revisao LLM?"}
+    L -- "nao" --> O["Mantem candidata validada"]
+    L -- "sim" --> M{"Revisor configurado?"}
+    M -- "OpenRouter" --> N["OpenRouter revisa divergencias e alertas"]
+    M -- "sem chave OpenRouter" --> P["Groq faz a revisao"]
+    N --> Q["Aplica resultado e fallback da politica quando necessario"]
+    P --> Q
+    F --> R["POST /api/v1/turn/submit"]
+    K --> R
+    O --> R
+    Q --> R
+    R --> S{"Servidor aceitou as decisoes?"}
+    S -- "nao" --> T["Registra alertas, remove decisoes invalidas e redelibera"]
+    T --> R
+    S -- "sim" --> U["Atualiza memoria e recebe next_pack"]
+    U --> V{"Rodada concluida?"}
+    V -- "nao" --> D
+    V -- "sim" --> W["Finaliza rodada e salva resultado JSON"]
+```
+
+Se uma chamada LLM falhar, exceder o orcamento ou retornar uma resposta invalida, a politica deterministica continua sendo a referencia. As respostas criticas de seguranca para tempestades e avarias nao sao substituidas pelo LLM.
+
 Especialistas implementados:
 
 - `navigation` (`navegador`): planeja velocidade considerando prazo, combustivel, avarias e limites.
@@ -160,6 +241,29 @@ Especialistas implementados:
 - `coordinator`: cadastrado pelo protocolo por turnos para completar a configuracao de papeis do servidor.
 
 Compras de combustivel sao sequenciadas para evitar competir pelo mesmo caixa. No modo LLM, decisoes validas continuam sujeitas aos portoes deterministas e ao resultado do servidor.
+
+## Depuracao no VS Code
+
+O arquivo `.vscode/launch.json` contem perfis para iniciar o modo por ticks, iniciar ou retomar uma rodada por turnos, rodar com LLM e iniciar o servidor Groq simulado.
+
+1. Abra a pasta do repositorio no VS Code e selecione o interpretador Python `.venv\Scripts\python.exe`.
+2. Selecione **Run and Debug** e escolha o perfil `Ocean: ...`.
+3. Pressione `F5`; os breakpoints funcionam no terminal integrado.
+4. Para depurar com o mock, inicie primeiro `Ocean: Groq mock local`, aguarde o servidor subir e depois inicie `Ocean: LLM via mock local`.
+
+Os perfis leem o `.env` local. O perfil que reseta a rodada esta nomeado explicitamente como **RESETAR rodada atual**; ele descarta o estado atual do simulador. Prefira os perfis sem reset ou de retomada quando quiser preservar uma rodada existente. O perfil do mock sobrescreve as chaves do provedor para usar somente `127.0.0.1`; o simulador Ocean ainda precisa estar acessivel.
+
+## Mapa mental interativo (Markmap)
+
+O GitHub renderiza os diagramas Mermaid acima diretamente no README, mas bloqueia scripts e iframes que permitiriam embutir um Markmap interativo na propria pagina. O workflow publica uma versao navegavel gerada a partir deste README:
+
+[Abrir o Markmap interativo do README](https://rodrigogalvao9.github.io/Ocean-deloitte-agent/)
+
+[![Mapa mental do README](https://rodrigogalvao9.github.io/Ocean-deloitte-agent/markmap.svg)](https://rodrigogalvao9.github.io/Ocean-deloitte-agent/)
+
+Depois da primeira publicacao, a imagem acima mostra uma previa estatica dentro do README; clique nela para abrir a versao interativa. A linha da previa e removida da fonte durante a geracao para evitar que o SVG inclua a si proprio.
+
+Para habilitar a publicacao, em **Settings > Pages**, selecione **GitHub Actions** como fonte. Depois do merge na branch `main`, o workflow gera e publica o Markmap sempre que o README mudar. A pagina interativa e separada; o fluxo Mermaid continua visivel diretamente aqui no README.
 
 ## Arquivos principais
 

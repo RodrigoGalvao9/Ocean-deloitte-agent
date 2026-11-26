@@ -1,0 +1,106 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Ocean: modo por ticks",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: turnos deterministico",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--modo-turnos"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: turnos (retomar)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--modo-turnos",
+        "--retomar"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: turnos (RESETAR rodada atual)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--modo-turnos",
+        "--reiniciar"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: LLM (Groq + OpenRouter se configurado)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--modo-turnos",
+        "--llm"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: Groq mock local",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/mock_groq.py",
+      "args": [
+        "--porta",
+        "9100",
+        "--modo",
+        "ecoa"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: LLM via mock local",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--modo-turnos",
+        "--llm"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "GROQ_API_KEY": "mock-local",
+        "GROQ_BASE_URL": "http://127.0.0.1:9100/v1",
+        "GROQ_USO_ARQUIVO": "${workspaceFolder}/results/.groq_mock_uso.json",
+        "OPENROUTER_API_KEY": ""
+      },
+      "justMyCode": true
+    }
+  ]
+}
