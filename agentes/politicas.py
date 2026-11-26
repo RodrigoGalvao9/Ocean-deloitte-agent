@@ -34,17 +34,29 @@ NAVEGAVEIS = ("AT_ORIGIN", "UNDERWAY", "HOLDING", "AT_BUNKER_STATION")
 
 @dataclass(frozen=True)
 class Tempestade:
+    """Janela e limites de velocidade/consumo de uma tempestade."""
+
     de: int
     ate: int
     velocidade_segura: float
     multiplicador: float
 
     def ativa(self, tick: int) -> bool:
+        """Indica se a tempestade esta ativa no tick informado.
+
+        Args:
+            tick: Tick a verificar.
+
+        Returns:
+            `True` para o intervalo semiaberto `[de, ate)`; caso contrario, `False`.
+        """
         return self.de <= tick < self.ate
 
 
 @dataclass(frozen=True)
 class Proposta:
+    """Acao produzida por um agente de politica para um navio."""
+
     papel: str                 # agente que propoe
     logico: str
     acao: dict[str, Any]
@@ -55,15 +67,30 @@ class Proposta:
 
 @dataclass
 class Memoria:
+    """Estado mutavel por rodada usado para limitar a frequencia de acoes."""
+
     ultima_velocidade: dict[str, int]   # logico -> tick do ultimo SET_SPEED
     compras: dict[str, int]             # logico -> tentativas de abastecimento
 
     @classmethod
     def vazia(cls) -> "Memoria":
+        """Cria memoria sem velocidade registrada ou compras realizadas.
+
+        Returns:
+            Nova memoria com os mapas internos vazios.
+        """
         return cls({}, {})
 
 
 def ler_tempestade(eventos: list[dict[str, Any]]) -> Tempestade | None:
+    """Localiza o primeiro evento de tempestade e converte seus parametros.
+
+    Args:
+        eventos: Eventos da rodada com payloads do servidor.
+
+    Returns:
+        Tempestade descrita pelo primeiro evento `E01_STORM`, ou `None`.
+    """
     for ev in eventos:
         p = ev["payload"]
         if p["event_code"] == "E01_STORM":
@@ -74,12 +101,33 @@ def ler_tempestade(eventos: list[dict[str, Any]]) -> Tempestade | None:
 
 
 def queima_por_tick(logico: str, velocidade: float, multiplicador: float = 1.0) -> float:
+    """Estima o consumo de combustivel em toneladas para um tick.
+
+    Args:
+        logico: Identificador logico do navio presente em `CONSUMO`.
+        velocidade: Velocidade em nos.
+        multiplicador: Fator de consumo adicional, por exemplo, durante tempestade.
+
+    Returns:
+        Toneladas de combustivel consumidas em um tick.
+    """
     hotel, coef = CONSUMO[logico]
     return (hotel + coef * (velocidade / 14) ** 3 * multiplicador) / 6
 
 
 def projetar(navio: dict, velocidade: float, tick: int, tempestade: Tempestade | None) -> tuple[int, float]:
-    """Retorna (tick de chegada, combustivel em t ate o fim da descarga) navegando a `velocidade`."""
+    """Projeta chegada e consumo ate o fim da descarga na velocidade informada.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        velocidade: Velocidade de navegacao em nos.
+        tick: Tick inicial da projecao.
+        tempestade: Condicoes de tempestade ou `None`.
+
+    Returns:
+        Tupla com tick estimado de chegada (ou `TOTAL_TICKS + 1` se nao chegar)
+        e combustivel consumido ate o fim da descarga, em toneladas.
+    """
     logico = navio["logical_id"]
     falta_nm = navio["route_total_nm"] - navio["progress_nautical_mile_milli"] / 1000
     gasto = CONSUMO[logico][0] / 6 * TICKS_DESCARGA
@@ -94,11 +142,28 @@ def projetar(navio: dict, velocidade: float, tick: int, tempestade: Tempestade |
 
 
 def combustivel_util(navio: dict) -> float:
+    """Calcula o combustivel disponivel acima da reserva obrigatoria.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+
+    Returns:
+        Combustivel utilizavel em toneladas, incluindo o abastecimento pendente.
+    """
     return (navio["fuel_milli"] + navio["pending_fuel_milli"] - navio["reserve_min_milli"]) / 1000
 
 
 def velocidade_por_prazo(navio: dict, tick: int, tempestade: Tempestade | None) -> float:
-    """Menor velocidade (passo 0,5) que chega no prazo com folga."""
+    """Calcula a menor velocidade em passos de 0,5 que atende ao prazo com folga.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick inicial da projecao.
+        tempestade: Condicoes de tempestade ou `None`.
+
+    Returns:
+        Velocidade escolhida em incrementos de 0,5 nos, limitada por `VELOCIDADE_MAX`.
+    """
     limite = navio["deadline_tick"] - TICKS_DESCARGA - FOLGA_PRAZO_TICKS
     v = VELOCIDADE_MIN
     while v < VELOCIDADE_MAX and projetar(navio, v, tick, tempestade)[0] > limite:
@@ -107,6 +172,16 @@ def velocidade_por_prazo(navio: dict, tick: int, tempestade: Tempestade | None) 
 
 
 def velocidade_alvo(navio: dict, tick: int, tempestade: Tempestade | None) -> float:
+    """Calcula a velocidade alvo respeitando combustivel, tempestade e limite ativo.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick atual da rodada.
+        tempestade: Condicoes de tempestade ou `None`.
+
+    Returns:
+        Velocidade alvo em nos, sem exceder os limites considerados pela politica.
+    """
     v = velocidade_por_prazo(navio, tick, tempestade)
     # Combustivel tem prioridade sobre prazo: atrasar custa pouco, violar a reserva zera a seguranca.
     while v > VELOCIDADE_MIN and projetar(navio, v, tick, tempestade)[1] > combustivel_util(navio) - FOLGA_COMBUSTIVEL_T:
@@ -117,10 +192,28 @@ def velocidade_alvo(navio: dict, tick: int, tempestade: Tempestade | None) -> fl
 
 
 def _velocidade(v: float) -> dict[str, Any]:
+    """Cria o payload de acao `SET_SPEED` para a velocidade indicada.
+
+    Args:
+        v: Velocidade em nos.
+
+    Returns:
+        Acao serializavel com `name` e argumentos formatados com duas casas.
+    """
     return {"name": "SET_SPEED", "arguments": {"speed_kn": f"{v:.2f}"}}
 
 
 def agente_seguranca(navio: dict, tick: int, tempestade: Tempestade | None) -> Proposta | None:
+    """Propõe contencao, reparo ou limite de velocidade por seguranca.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick atual da rodada.
+        tempestade: Condicoes de tempestade ou `None`.
+
+    Returns:
+        Proposta prioritaria de seguranca ou `None` se nenhuma acao for necessaria.
+    """
     logico, estado = navio["logical_id"], navio["ship_state"]
     if navio["e04_active"]:
         if estado == "UNDERWAY" and float(navio["target_speed_kn"]) > 0:
@@ -139,6 +232,18 @@ def agente_seguranca(navio: dict, tick: int, tempestade: Tempestade | None) -> P
 
 def agente_economia(navio: dict, tick: int, tempestade: Tempestade | None, caixa_livre_cent: int,
                     memoria: Memoria) -> Proposta | None:
+    """Propõe abastecimento antes da partida quando ha deficit projetado.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick atual da rodada.
+        tempestade: Condicoes de tempestade ou `None`.
+        caixa_livre_cent: Orcamento disponivel em centavos.
+        memoria: Memoria com tentativas de compra ja feitas.
+
+    Returns:
+        Proposta `BUY_FUEL` viavel ou `None` se nao houver necessidade/condicoes.
+    """
     logico = navio["logical_id"]
     if navio["ship_state"] != "AT_ORIGIN" or navio["progress_nautical_mile_milli"] > 0:
         return None
@@ -157,6 +262,17 @@ def agente_economia(navio: dict, tick: int, tempestade: Tempestade | None, caixa
 
 
 def agente_navegacao(navio: dict, tick: int, tempestade: Tempestade | None, memoria: Memoria) -> Proposta | None:
+    """Propõe ajuste de velocidade para iniciar, retomar ou otimizar a viagem.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick atual da rodada.
+        tempestade: Condicoes de tempestade ou `None`.
+        memoria: Memoria usada para respeitar o intervalo entre ajustes.
+
+    Returns:
+        Proposta `SET_SPEED` ou `None` quando nao ha ajuste permitido.
+    """
     logico, estado = navio["logical_id"], navio["ship_state"]
     if estado not in NAVEGAVEIS or navio["e04_active"]:
         return None
@@ -177,7 +293,18 @@ def agente_navegacao(navio: dict, tick: int, tempestade: Tempestade | None, memo
 
 def propor(navio: dict, tick: int, tempestade: Tempestade | None, caixa_livre_cent: int,
            memoria: Memoria) -> Proposta | None:
-    """Uma proposta por navio por tick, em ordem de prioridade: seguranca, economia, navegacao."""
+    """Seleciona no maximo uma proposta por navio, priorizando seguranca, economia e navegacao.
+
+    Args:
+        navio: Estado do navio retornado pelo servidor.
+        tick: Tick atual da rodada.
+        tempestade: Condicoes de tempestade ou `None`.
+        caixa_livre_cent: Orcamento disponivel em centavos para compras.
+        memoria: Memoria das acoes realizadas nesta rodada.
+
+    Returns:
+        Primeira proposta aplicavel na ordem de prioridade, ou `None`.
+    """
     if navio["state_age_ticks"] > 2:  # o servidor so aceitaria contencao; esperar o sinal voltar
         return None
     seguranca = agente_seguranca(navio, tick, tempestade)
@@ -189,7 +316,18 @@ def propor(navio: dict, tick: int, tempestade: Tempestade | None, caixa_livre_ce
 
 def revisar(p: Proposta, navio: dict, tick: int, tempestade: Tempestade | None,
             caixa_livre_cent: int) -> list[str]:
-    """Checagem independente do revisor. Lista vazia = aprovado; senao, codigos do veto."""
+    """Faz a checagem independente; lista vazia significa aprovada.
+
+    Args:
+        p: Proposta que sera verificada independentemente.
+        navio: Estado atual do navio retornado pelo servidor.
+        tick: Tick em que a proposta sera executada.
+        tempestade: Condicoes de tempestade ou `None`.
+        caixa_livre_cent: Orcamento disponivel em centavos.
+
+    Returns:
+        Lista de codigos de veto; vazia quando a proposta e aprovada.
+    """
     vetos: list[str] = []
     nome, args, estado = p.acao["name"], p.acao["arguments"], navio["ship_state"]
     parado = float(navio["effective_speed_kn"]) == 0

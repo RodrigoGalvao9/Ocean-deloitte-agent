@@ -27,6 +27,13 @@ NOMES = {"navigation": "navegador", "safety": "guardiao", "economy": "economista
 
 
 def carregar_env(caminho: Path) -> None:
+    """Carrega variaveis de ambiente de um arquivo sem substituir valores existentes.
+
+    Linhas vazias, comentarios e linhas sem `=` sao ignorados.
+
+    Args:
+        caminho: Caminho do arquivo de variaveis de ambiente.
+    """
     if not caminho.is_file():
         return
     for linha in caminho.read_text(encoding="utf-8").splitlines():
@@ -37,11 +44,27 @@ def carregar_env(caminho: Path) -> None:
 
 
 def especificacoes(equipe: str) -> list[dict[str, Any]]:
+    """Monta as especificacoes dos tres agentes padrao da equipe.
+
+    Args:
+        equipe: Identificador da equipe usado no identificador de cada agente.
+
+    Returns:
+        Especificacoes com `actor_id`, papel e versao de politica.
+    """
     return [{"actor_id": f"{equipe}-{nome}", "role": papel, "version": VERSAO_POLITICA}
             for papel, nome in NOMES.items()]
 
 
 def agentes_da_equipe(equipe: str) -> dict[str, Agente]:
+    """Cria os objetos de agente indexados pelo papel.
+
+    Args:
+        equipe: Identificador da equipe usada para formar os IDs dos agentes.
+
+    Returns:
+        Mapa de papel para agente com token deterministico do simulador.
+    """
     # Token deterministico atribuido pelo servidor quando nenhum e informado no cadastro.
     return {e["role"]: Agente(e["actor_id"], e["role"], f"tok-{e['actor_id']}-poc")
             for e in especificacoes(equipe)}
@@ -50,7 +73,20 @@ def agentes_da_equipe(equipe: str) -> dict[str, Agente]:
 def executar_cadeia(cliente: ClienteOcean, agentes: dict[str, Agente], proposta: politicas.Proposta,
                     estado: dict, tick: int, tempestade: politicas.Tempestade | None,
                     memoria: politicas.Memoria) -> str:
-    """Proposta, revisao cruzada e comando. Retorna 'committed', 'vetoed' ou 'rejected'."""
+    """Executa proposta, revisao cruzada independente e comando.
+
+    Args:
+        cliente: Cliente HTTP usado para enviar decisoes e comandos.
+        agentes: Agentes indexados pelo papel.
+        proposta: Acao proposta para um navio neste tick.
+        estado: Snapshot atual da rodada retornado pelo servidor.
+        tick: Tick em que a cadeia esta sendo executada.
+        tempestade: Condicoes de tempestade ativas ou `None`.
+        memoria: Memoria mutavel das acoes realizadas nesta rodada.
+
+    Returns:
+        Estado da cadeia: `committed`, `vetoed` ou `rejected`.
+    """
     navio = estado["ships"][proposta.logico]
     navio_id = navio["ship_id"]
     telemetria = estado["latest_telemetry"][navio_id]
@@ -125,6 +161,20 @@ def executar_cadeia(cliente: ClienteOcean, agentes: dict[str, Agente], proposta:
 
 def jogar_tick(cliente: ClienteOcean, agentes: dict[str, Agente], pool: ThreadPoolExecutor, tick: int,
                memoria: politicas.Memoria, placar: dict[str, int], caixa_canal: Caixa | None) -> None:
+    """Processa um tick: abertura, heartbeat, leitura, decisoes e fechamento.
+
+    Args:
+        cliente: Cliente HTTP do simulador.
+        agentes: Agentes ativos indexados pelo papel.
+        pool: Pool para executar heartbeats e cadeias em paralelo.
+        tick: Tick a processar.
+        memoria: Memoria mutavel das acoes realizadas nesta rodada.
+        placar: Contadores mutaveis de resultados e falhas.
+        caixa_canal: Buffer do canal em tempo real ou `None` para usar REST.
+
+    Raises:
+        ErroOcean: Se uma operacao obrigatoria do cliente falhar.
+    """
     emitidas = cliente.abrir_tick(tick)
     placar["heartbeats_falhos"] += list(pool.map(lambda a: cliente.heartbeat(a, tick), agentes.values())).count(False)
 
@@ -152,6 +202,11 @@ def jogar_tick(cliente: ClienteOcean, agentes: dict[str, Agente], pool: ThreadPo
 
 
 def imprimir_resultado(resultado: dict[str, Any]) -> None:
+    """Registra no log o placar final e as dimensoes do resultado.
+
+    Args:
+        resultado: Envelope final retornado pelo servidor.
+    """
     carga = resultado["result_envelope"]["payload"]
     log.info("score_final=%s rank_eligible=%s", carga["score_final"], carga["rank_eligible"])
     log.info("dimensoes: %s", json.dumps(carga.get("dimensions"), ensure_ascii=False))
@@ -159,6 +214,14 @@ def imprimir_resultado(resultado: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Executa o orquestrador da frota a partir dos argumentos da linha de comando.
+
+    Args:
+        argv: Argumentos opcionais; se omitidos, sao lidos de `sys.argv`.
+
+    Returns:
+        Codigo de saida: `0` em sucesso, `1` para erro Ocean ou `130` em interrupcao.
+    """
     carregar_env(RAIZ / ".env")
     porta = os.getenv("OCEAN_PORT", "8000")
     args = argparse.ArgumentParser(prog="python -m agentes", description="Agentes autonomos da frota Ocean")
