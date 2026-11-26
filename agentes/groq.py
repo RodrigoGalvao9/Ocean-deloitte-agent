@@ -143,8 +143,15 @@ class ClienteLLM:
         self.modelo, self.url = modelo, url_base.rstrip("/")
         self.limites = limites or Limites()
         self.uso = uso or UsoDiario(None)
-        self.limitador = Limitador(self.limites, relogio, dormir)
-        self._dormir = dormir
+        self.espera_s = 0.0                          # total dormido: limite por minuto, 429, retentativas
+        self.ultimo_uso: dict[str, Any] | None = None
+
+        def contar(segundos: float) -> None:
+            self.espera_s += segundos
+            dormir(segundos)
+
+        self.limitador = Limitador(self.limites, relogio, contar)
+        self._dormir = contar
         self.http = http or httpx.Client(timeout=timeout_s)
         self._cabecalhos = {"Authorization": f"Bearer {chave}", "Content-Type": "application/json"}
         self._opcionais: dict[str, Any] = dict(opcionais if opcionais is not None else
@@ -162,7 +169,7 @@ class ClienteLLM:
         return sum(len(t) for t in textos) // 3 + SAIDA_ESTIMADA   # ~3 caracteres/token: conservador
 
     def conversar(self, sistema: str, usuario: str) -> dict[str, Any]:
-        estimativa = self.estimar(sistema, usuario)
+        estimativa, self.ultimo_uso = self.estimar(sistema, usuario), None
         if not self.cabe(estimativa):
             raise OrcamentoEsgotado(f"orcamento diario de tokens esgotado ({self.uso.tokens}/{self.limites.tpd})")
         registro = self.limitador.reservar(estimativa)
@@ -212,6 +219,7 @@ class ClienteLLM:
         real = int((dados.get("usage") or {}).get("total_tokens") or registro[1])
         self.limitador.acertar(registro, real)
         self.uso.somar(real)
+        self.ultimo_uso = dados.get("usage")
         self.tokens_sessao += real
         self.chamadas += 1
         try:

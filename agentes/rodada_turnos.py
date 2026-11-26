@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import decisao
+from . import decisao, telemetria
 from .cliente import ClienteOcean, ErroOcean
 from .groq import (ClienteLLM, ErroLLM, Limites, UsoDiario, MODELO_PADRAO, MODELO_REVISOR, URL_PADRAO,
                    URL_REVISOR)
@@ -38,6 +38,21 @@ def _descartar_invalidas(decisoes: list[dict], propostas: list[Proposta],
 
 def jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria, base: int,
                 placar: dict[str, int], cerebro: Any = None) -> ResultadoTurno:
+    """Um turno, registrado no Langfuse (quando ativo) com decisoes e desfecho."""
+    tick = decisao.tick_atual(pacote)
+    with telemetria.observar("turno", input={"tick": tick, "avanco": base}) as turno:
+        resultado, decisoes = _jogar_turno(turnos, pacote, memoria, base, placar, cerebro)
+        relatorio = resultado.relatorio
+        turno.update(output={
+            "decisoes": decisoes, "ate_tick": relatorio.get("to_tick"),
+            "motivos_parada": relatorio.get("stop_reasons"),
+            "aplicadas": [{"navio": a["ship_id"], "acao": a["action"], "status": a["status"]}
+                          for a in relatorio.get("applied_decisions", [])]})
+    return resultado
+
+
+def _jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria, base: int,
+                 placar: dict[str, int], cerebro: Any) -> tuple[ResultadoTurno, list[dict]]:
     """Delibera e envia um turno. Decisao recusada pelo servidor e descartada, nao derruba a rodada."""
     tick = decisao.tick_atual(pacote)
     cerebro = cerebro or CerebroDeterministico()
@@ -53,10 +68,13 @@ def jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria,
             for e in erro.erros:
                 if isinstance(e, dict) and isinstance(e.get("index"), int) and 0 <= e["index"] < len(decisoes):
                     cerebro.alertar(decisoes[e["index"]]["ship_id"], str(e.get("message") or erro.codigo))
+                    telemetria.evento("recusa-servidor", "WARNING", tick=tick, decisao=decisoes[e["index"]],
+                                      motivo=e.get("message"))
             restante = _descartar_invalidas(decisoes, propostas, erro)
             if restante is None or tentativa >= MAX_DESCARTES:
                 log.warning("submit recusado (%s); avancando 1 tick sem decisoes para redeliberar", erro)
                 restante, avanco = ([], []), 1
+                telemetria.evento("submit-sem-decisoes", "WARNING", tick=tick, motivo=str(erro))
             placar["descartadas"] += len(decisoes) - len(restante[0])
             decisoes, propostas = restante
     if resultado.recuperado:
@@ -70,8 +88,9 @@ def jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria,
             elif a["status"] != "vetoed":
                 log.warning("tick %3d %-8s %s %s: %s", tick, a["ship_id"], a["action"]["name"], a["status"], a["reason"])
                 cerebro.alertar(a["ship_id"], a["reason"])
+                telemetria.evento("recusa-servidor", "WARNING", tick=tick, navio=a["ship_id"], motivo=a["reason"])
             placar[a["status"] if a["status"] in ("committed", "vetoed") else "rejected"] += 1
-    return resultado
+    return resultado, decisoes
 
 
 def _criar_cerebro(opcoes: argparse.Namespace) -> CerebroDeterministico | CerebroLLM:
@@ -125,6 +144,8 @@ def executar(opcoes: argparse.Namespace) -> int:
             pacote = turnos.pacote(modo=modo)
 
         cerebro = _criar_cerebro(opcoes)
+        telemetria.iniciar(f"{estado['team_id']}-{modo}-{time.strftime('%Y%m%d-%H%M%S')}",
+                           [modo, "llm" if opcoes.llm else "deterministico"])
         memoria = Memoria.vazia()  # ao retomar, so o intervalo anti-churn recomeca do zero
         placar = {"committed": 0, "vetoed": 0, "rejected": 0, "descartadas": 0, "respostas_perdidas": 0}
         log.info("%s | %s | modo %s | MODO POR TURNOS (avanco %d) | a partir do tick %d", opcoes.url,
@@ -150,6 +171,10 @@ def executar(opcoes: argparse.Namespace) -> int:
         if opcoes.llm:
             log.info("LLM: %s", json.dumps(cerebro.resumo(), ensure_ascii=False))
         imprimir_resultado(resultado_final)
+        score = resultado_final["result_envelope"]["payload"].get("score_final")
+        telemetria.evento("resumo-rodada", placar=placar, turnos=n_turnos, llm=cerebro.resumo(), score_final=score)
+        if score is not None:
+            telemetria.pontuar("score_final", float(score))
         prova = (final.get("result_envelope", {}).get("payload", {}) or {}).get("multi_agent_proof") or {}
         log.info("prova multiagente: %s", prova.get("compliant", "n/d"))
         log.info("resultado salvo em %s", destino)
@@ -161,6 +186,7 @@ def executar(opcoes: argparse.Namespace) -> int:
         log.error("interrompido; continue com --modo-turnos --retomar")
         return 130
     finally:
+        telemetria.fechar()
         cliente.fechar()
         if isinstance(cerebro, CerebroLLM):
             cerebro.propositor.fechar()

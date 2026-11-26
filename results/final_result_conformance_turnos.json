@@ -3,9 +3,9 @@
     "specversion": "1.0",
     "contract_version": "1.1.0-pilot",
     "message_type": "result",
-    "message_id": "msg-result-01a2171f-f153-74d3-a488-345701bfe75c",
-    "occurred_at": "2026-11-26T09:11:39.091Z",
-    "recorded_at": "2026-11-26T09:11:39.091Z",
+    "message_id": "msg-result-01a21851-c27f-7df5-ad46-4b2457ce16c2",
+    "occurred_at": "2026-11-26T14:45:41.119Z",
+    "recorded_at": "2026-11-26T14:45:41.119Z",
     "round_id": "round-2026-01",
     "session_id": "session-team-04-round-2026-01",
     "team_id": "team-04",
@@ -24,8 +24,8 @@
     },
     "sequence": 1,
     "payload": {
-      "ledger_root_sha256": "75e2b48bd281c32514988145e27f7e39d8e256ff93e20742ba484caa7551336b",
-      "replay_root_sha256": "75e2b48bd281c32514988145e27f7e39d8e256ff93e20742ba484caa7551336b",
+      "ledger_root_sha256": "909776e9cab13804af57368bcb06cfe6ce9bdfca10f80e35748b1236a116864f",
+      "replay_root_sha256": "909776e9cab13804af57368bcb06cfe6ce9bdfca10f80e35748b1236a116864f",
       "baseline_version": "1.1.0-pilot",
       "economy_version": "1.1.0-pilot",
       "scoring_version": "1.1.0-pilot",
@@ -69,7 +69,7 @@
       "human_interventions": 0,
       "multi_agent_proof": {
         "compliant": true,
-        "evidence_root_sha256": "d38e1539b40d7ad4a608b2f7119f3b863d712976ff1e7bad5f96db9992872ab6",
+        "evidence_root_sha256": "705ef330c546ab0d64440f24e64c44b433198c9c9cd1de3ceb9d72fed5cc5313",
         "eligible_agents": [
           "team-04-navigation-agent",
           "team-04-safety-agent"
@@ -124,7 +124,7 @@
       "rounding": "half_even_4_decimals_from_unrounded_dimensions_at_display_and_total"
     },
     "integrity": {
-      "payload_sha256": "f6e6fd96f03ed61e1b5f611ca4df984b1ab6e88632390d42291cb1f39df2ab71",
+      "payload_sha256": "7adcf3d747f218b01dbbdc763dc10d030b31f258bb2dac3cb6c6231bbeb58c68",
       "schema_id": "https://ocean.local/schemas/result.schema.json"
     }
   },
@@ -213,7 +213,7 @@
     "valid": true,
     "entry_count": 6553,
     "raw_count": 6553,
-    "merkle_root_sha256": "75e2b48bd281c32514988145e27f7e39d8e256ff93e20742ba484caa7551336b"
+    "merkle_root_sha256": "909776e9cab13804af57368bcb06cfe6ce9bdfca10f80e35748b1236a116864f"
   },
   "status": "completed",
   "finalized": true

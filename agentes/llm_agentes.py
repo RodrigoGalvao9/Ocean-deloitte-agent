@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from typing import Any
 
-from . import politicas
+from . import politicas, telemetria
 from .decisao import (REVISOR, ler_tempestade, montar_decisao, propostas_do_turno, tick_atual, adaptar_navio)
 from .groq import ClienteLLM, ErroLLM, OrcamentoEsgotado
 from .politicas import Memoria, Proposta, Tempestade
@@ -201,6 +201,11 @@ class CerebroLLM:
         return {**self.stats, **uso}
 
     # --- chamadas ao modelo
+    def _desligar(self, cliente: ClienteLLM, motivo: str) -> None:
+        self.desligados.add(cliente)
+        log.warning("%s: %s desligado, a politica deterministica continua", motivo, cliente.nome)
+        telemetria.evento("llm-desligado", "WARNING", provedor=cliente.nome, motivo=motivo)
+
     def _perguntar(self, sistema: str, ctx: dict[str, Any]) -> dict[str, Any] | None:
         papel = "revisor" if sistema == SISTEMA_REVISOR else "propositor"
         cliente = self.revisor if papel == "revisor" else self.propositor
@@ -209,28 +214,38 @@ class CerebroLLM:
         usuario = json.dumps(ctx, ensure_ascii=False, separators=(",", ":"))
         if (self.orcamento is not None and cliente is self.propositor
                 and cliente.tokens_sessao + cliente.estimar(sistema, usuario) > self.orcamento):
-            self.desligados.add(cliente)
-            log.warning("orcamento de tokens da execucao esgotado (%d): %s desligado", self.orcamento, cliente.nome)
+            self._desligar(cliente, f"orcamento de tokens da execucao esgotado ({self.orcamento})")
             return None
-        antes, inicio = cliente.tokens_sessao, time.monotonic()
+        antes, inicio, espera_antes = cliente.tokens_sessao, time.monotonic(), cliente.espera_s
         log.info("tick %3d LLM %s: consultando %s (%s)", ctx["tick"], papel, cliente.modelo, cliente.nome)
-        try:
-            resposta = cliente.conversar(sistema, usuario)
-            log.info("tick %3d LLM %s: ok em %.1f s, %d tokens (hoje: %d tokens, %d requisicoes)", ctx["tick"],
-                     papel, time.monotonic() - inicio, cliente.tokens_sessao - antes, cliente.uso.tokens,
-                     cliente.uso.requisicoes)
-            self.falhas_seguidas[cliente] = 0
-            return resposta
-        except OrcamentoEsgotado as erro:
-            self.desligados.add(cliente)
-            log.warning("%s: %s desligado, a politica deterministica continua", erro, cliente.nome)
-        except ErroLLM as erro:
-            self.stats["falhas_llm"] += 1
-            log.warning("LLM %s falhou (%s); seguindo sem ele neste turno", papel, erro)
-            self.falhas_seguidas[cliente] += 1
-            if self.falhas_seguidas[cliente] >= MAX_FALHAS_SEGUIDAS:
-                self.desligados.add(cliente)
-                log.warning("%d falhas seguidas: %s desligado", MAX_FALHAS_SEGUIDAS, cliente.nome)
+        with telemetria.observar(f"llm-{papel}", "generation", model=cliente.modelo,
+                                 input=[{"role": "system", "content": sistema},
+                                        {"role": "user", "content": usuario}]) as geracao:
+            def medidas() -> dict[str, Any]:
+                return {"tick": ctx["tick"], "papel": papel, "provedor": cliente.nome,
+                        "espera_s": round(cliente.espera_s - espera_antes, 1)}
+            try:
+                resposta = cliente.conversar(sistema, usuario)
+                uso = cliente.ultimo_uso or {}
+                geracao.update(output=resposta, metadata=medidas(), usage_details={
+                    chave: uso[origem] for chave, origem in (("input", "prompt_tokens"),
+                    ("output", "completion_tokens"), ("total", "total_tokens"))
+                    if isinstance(uso.get(origem), int)})
+                log.info("tick %3d LLM %s: ok em %.1f s, %d tokens (hoje: %d tokens, %d requisicoes)", ctx["tick"],
+                         papel, time.monotonic() - inicio, cliente.tokens_sessao - antes, cliente.uso.tokens,
+                         cliente.uso.requisicoes)
+                self.falhas_seguidas[cliente] = 0
+                return resposta
+            except OrcamentoEsgotado as erro:
+                geracao.update(level="WARNING", status_message=str(erro), metadata=medidas())
+                self._desligar(cliente, str(erro))
+            except ErroLLM as erro:
+                geracao.update(level="ERROR", status_message=str(erro), metadata=medidas())
+                self.stats["falhas_llm"] += 1
+                log.warning("LLM %s falhou (%s); seguindo sem ele neste turno", papel, erro)
+                self.falhas_seguidas[cliente] += 1
+                if self.falhas_seguidas[cliente] >= MAX_FALHAS_SEGUIDAS:
+                    self._desligar(cliente, f"{MAX_FALHAS_SEGUIDAS} falhas seguidas")
         return None
 
     # --- decisao do turno
@@ -256,10 +271,15 @@ class CerebroLLM:
 
         def incluir(proposta: Proposta, vetos: list[str], racional: str | None = None,
                     prefixo: str | None = None) -> list[str]:
+            origem = "regra"
             rev = None if vetos else pareceres.get(_chave(proposta.logico, proposta.acao))
             if rev and rev["resultado"] == "rejected":
                 vetos = rev["codigos"] or ["LLM_REVIEW_REJECTED"]
                 self.stats["vetos_revisor_llm"] += 1
+                origem = "revisor-llm"
+            if vetos:
+                telemetria.evento("veto", "WARNING", tick=tick, navio=proposta.logico, acao=proposta.acao,
+                                  origem=origem, codigos=vetos)
             decisoes.append(montar_decisao(proposta, vetos, racional,
                                            (rev or {}).get("justificativa") or None, prefixo))
             propostas.append(proposta)
@@ -275,6 +295,7 @@ class CerebroLLM:
                     self.stats["propostas_vetadas"] += 1
                     if usar_base is not None and diverge:
                         self.stats["fallback_politica"] += 1
+                        telemetria.evento("fallback-politica", tick=tick, navio=lid, acao=usar_base.acao)
                         incluir(usar_base, base_vetos[lid])
                 else:
                     self.stats["propostas_llm_aprovadas"] += 1

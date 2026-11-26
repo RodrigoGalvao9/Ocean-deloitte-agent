@@ -128,6 +128,10 @@ As respostas do modelo sao convertidas para o formato de acao esperado e passam 
 
 O contador diario de uso e gravado em `results/.groq_uso.json` por padrao, permitindo que o limite diario seja respeitado entre execucoes. `--llm-modo proposta` pode reduzir o consumo por evitar a etapa de revisao feita pelo modelo.
 
+#### Monitoramento com Langfuse (opcional)
+
+Com `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` definidas (e `LANGFUSE_BASE_URL` ou `LANGFUSE_HOST` fora da regiao padrao), o modo por turnos, com ou sem `--llm`, envia uma sessao por execucao: um trace por turno com decisoes e status, uma generation por chamada LLM (prompt, resposta, tokens, latencia e `espera_s`), eventos `veto`, `fallback-politica`, `recusa-servidor`, `submit-sem-decisoes`, `llm-desligado` e `resumo-rodada`, e o score `score_final`. Sem as chaves, ou se o Langfuse estiver indisponivel no inicio, a rodada segue sem rastreio. Instale a dependencia com `pip install -r requirements.txt`.
+
 #### Teste local do fluxo LLM sem chave Groq real
 
 O repositorio inclui um servidor Groq simulado em `tests/mock_groq.py`. Em um terminal, inicie-o:
