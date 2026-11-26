@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import politicas
+from . import politicas, rodada_turnos
+from .rodada_turnos import AVANCO_BASE
 from .canais import TIPOS, Caixa, abrir_canal
 from .cliente import VERSAO_CONTRATO, Agente, ClienteOcean, ErroOcean, hash_acao
 
@@ -173,10 +174,26 @@ def main(argv: list[str] | None = None) -> int:
                       help="URL publica que o servidor chama (tunel); padrao: http://127.0.0.1:<porta>/")
     args.add_argument("--webhook-porta", type=int, default=int(os.getenv("OCEAN_WEBHOOK_PORTA") or 9000))
     args.add_argument("--saida", type=Path, default=RAIZ / "results")
+    args.add_argument("--modo-turnos", action="store_true",
+                      help="usa /api/v1/turn/*: sem heartbeats, janela de tempo nem canal em tempo real")
+    args.add_argument("--avanco", type=int, default=int(os.getenv("OCEAN_AVANCO") or AVANCO_BASE),
+                      help="ticks por turno no modo por turnos (padrao %(default)s)")
+    args.add_argument("--llm", action="store_true", help="agentes LLM (Groq) sobre a politica; exige --modo-turnos")
+    args.add_argument("--llm-modo", choices=("completo", "proposta"), default="completo",
+                      help="completo: LLM propoe e revisa; proposta: so propoe (gasta ~metade dos tokens)")
+    args.add_argument("--llm-orcamento", type=int, default=int(os.getenv("OCEAN_LLM_ORCAMENTO") or 120_000),
+                      help="maximo de tokens do Groq nesta execucao; ao esgotar segue so com a politica")
     opcoes = args.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    if opcoes.llm and not opcoes.modo_turnos:
+        args.error("--llm exige --modo-turnos")
+    if opcoes.modo_turnos:
+        if not 1 <= opcoes.avanco <= 432:
+            args.error("--avanco deve estar entre 1 e 432")
+        return rodada_turnos.executar(opcoes)
 
     cliente = ClienteOcean(opcoes.url, os.getenv("OCEAN_ADMIN_TOKEN") or None)
     try:
