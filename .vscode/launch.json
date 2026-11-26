@@ -1,0 +1,56 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Ocean: modo por ticks",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: canal REST",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--canal",
+        "rest"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: retomar rodada",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--retomar"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "Ocean: RESETAR rodada atual",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agentes",
+      "args": [
+        "--reiniciar"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    }
+  ]
+}
