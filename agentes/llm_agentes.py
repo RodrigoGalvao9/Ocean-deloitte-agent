@@ -3,19 +3,20 @@
 O LLM propoe e revisa, mas nunca tem a ultima palavra sobre seguranca:
   * resposta a E01 (tempestade) e E04 (avaria) continua deterministica (o LLM nao a sobrescreve);
   * toda proposta do LLM passa por `politicas.revisar` + portoes extras (prazo, combustivel, anti-churn);
-  * proposta vetada, invalida ou falha do Groq => a decisao deterministica do mesmo navio e usada.
+  * proposta vetada, invalida ou falha do LLM => a decisao deterministica do mesmo navio e usada.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import time
 from collections import Counter
 from typing import Any
 
 from . import politicas
 from .decisao import (REVISOR, ler_tempestade, montar_decisao, propostas_do_turno, tick_atual, adaptar_navio)
-from .groq import ClienteGroq, ErroLLM, OrcamentoEsgotado
+from .groq import ClienteLLM, ErroLLM, OrcamentoEsgotado
 from .politicas import Memoria, Proposta, Tempestade
 
 log = logging.getLogger("ocean")
@@ -23,6 +24,7 @@ log = logging.getLogger("ocean")
 ACOES_LLM = ("SET_SPEED", "HOLD", "REPAIR", "BUY_FUEL")
 FOLGA_PRAZO_LLM = 15   # ticks de folga exigidos de uma desaceleracao proposta pelo LLM
 MODOS = ("completo", "proposta")
+MAX_FALHAS_SEGUIDAS = 3   # provedor fora do ar: desliga o LLM em vez de esperar em todo turno
 
 SISTEMA_PROPOSITOR = """[PAPEL:PROPOSITOR] Voce e a equipe de propositores (navigation, economy, safety) de uma frota de 4 navios graneleiros na Operacao Oceanica. Objetivo: entregar a carga no prazo, sem violar a reserva de combustivel, ao menor custo; seguranca em primeiro lugar.
 Regras:
@@ -33,6 +35,7 @@ Regras:
 Responda SOMENTE com JSON: {"propostas":[{"navio":"S1-FAROL","papel":"navigation","acao":{"name":"SET_SPEED","arguments":{"speed_kn":"12.50"}},"justificativa":"ate 25 palavras"}]}. Use {"propostas":[]} se nada deve ser feito."""
 
 SISTEMA_REVISOR = """[PAPEL:REVISOR] Voce e o revisor independente da frota (safety revisa navigation e economy; navigation revisa safety). Confira cada proposta contra o estado do navio: reserva de combustivel, prazo, tempestade, estado operacional e limites. Aprove apenas o que for seguro e materialmente util; vete o que arriscar reserva, prazo ou seguranca, ou for redundante.
+Quando houver "alerta", o servidor nao permite a acao ou recusou a anterior desse navio: aprove somente se ela continuar correta.
 Responda SOMENTE com JSON: {"revisoes":[{"id":"p1","resultado":"approved","codigos":[],"justificativa":"ate 20 palavras"}]} (resultado: approved ou rejected; codigos so quando rejected)."""
 
 
@@ -79,13 +82,12 @@ def montar_contexto(pacote: dict[str, Any], memoria: Memoria,
     return ctx
 
 
-def turno_relevante(pacote: dict[str, Any], base: dict[str, Proposta]) -> bool:
-    """O LLM so e chamado quando ha o que decidir: poupa o TPM/TPD."""
-    if base or pacote["meta"].get("window_summary", {}).get("new_events"):
-        return True
-    tempestade, tick = ler_tempestade(pacote), tick_atual(pacote)
-    return bool(tempestade and tempestade.ativa(tick)) or any(
-        n["operational_state"]["e04_active"] for n in pacote["ships"].values())
+def turno_relevante(pacote: dict[str, Any], base: dict[str, Proposta], criticas: set[str]) -> bool:
+    """O LLM so e chamado quando pode mudar algo: evento novo ou proposta nao critica.
+
+    Tempestade/avaria sem nada alem da resposta critica nao conta: o LLM nao pode substitui-la.
+    """
+    return bool(set(base) - criticas or pacote["meta"].get("window_summary", {}).get("new_events"))
 
 
 # --------------------------------------------------------------------------- validacao
@@ -110,7 +112,7 @@ def normalizar_acao(acao: Any, navio: dict[str, Any]) -> dict[str, Any] | None:
                                                 else "WEATHER_PRECAUTION"}}
         if nome == "REPAIR":
             return {"name": nome, "arguments": {"fault_id": "E04_ENGINE_FAULT"}}
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
     return None
 
@@ -146,6 +148,22 @@ def portao(p: Proposta, navio: dict[str, Any], tick: int, tempestade: Tempestade
     return list(dict.fromkeys(vetos))
 
 
+def fora_do_permitido(navio: dict[str, Any], acao: dict[str, Any]) -> str | None:
+    """Motivo pelo qual o servidor nao permite agora uma acao que passou pelas regras, ou None."""
+    permitidas = {a["action"]: a.get("constraints") or {} for a in navio.get("allowed_actions_now", [])}
+    nome = acao["name"]
+    if nome not in permitidas:
+        return navio.get("blocked_actions_reasons", {}).get(nome) or f"{nome} fora de allowed_actions_now"
+    maximo = permitidas[nome].get("max_quantity_t")
+    if nome == "BUY_FUEL" and maximo is not None and acao["arguments"]["quantity_t"] > maximo:
+        return f"quantidade acima do maximo aceito pelo servidor ({maximo} t)"
+    return None
+
+
+def _chave(logico: str, acao: dict[str, Any]) -> tuple[str, str]:
+    return logico, json.dumps(acao, sort_keys=True)
+
+
 # --------------------------------------------------------------------------- cerebros
 class CerebroDeterministico:
     """Politica pura (etapas 2 e 3): sem LLM."""
@@ -154,40 +172,65 @@ class CerebroDeterministico:
         itens = propostas_do_turno(pacote, memoria)
         return [montar_decisao(p, v) for p, _, v in itens], [p for p, _, _ in itens]
 
+    def alertar(self, logico: str, motivo: str) -> None:
+        pass   # sem LLM nao ha revisor reserva
+
     def resumo(self) -> dict[str, Any]:
         return {}
 
 
 class CerebroLLM:
-    def __init__(self, groq: ClienteGroq, modo: str = "completo", orcamento_tokens: int | None = None) -> None:
+    def __init__(self, propositor: ClienteLLM, modo: str = "completo", orcamento_tokens: int | None = None,
+                 revisor: ClienteLLM | None = None) -> None:
         if modo not in MODOS:
             raise ValueError(f"modo LLM invalido: {modo}")
-        self.groq, self.modo, self.orcamento = groq, modo, orcamento_tokens
+        self.propositor, self.revisor = propositor, revisor or propositor   # sem revisor proprio: o mesmo
+        self.modo, self.orcamento = modo, orcamento_tokens
         self.stats: Counter[str] = Counter()
-        self.desligado = False
+        self.desligados: set[ClienteLLM] = set()                 # cada cliente cai sozinho
+        self.falhas_seguidas: Counter[ClienteLLM] = Counter()
+        self.alertas: dict[str, str] = {}   # navio -> recusa do servidor ainda nao revisada
+
+    def alertar(self, logico: str, motivo: str) -> None:
+        self.alertas[logico] = motivo[:240]
 
     def resumo(self) -> dict[str, Any]:
-        return {**self.stats, "chamadas": self.groq.chamadas, "tokens": self.groq.tokens_sessao,
-                "tokens_dia": self.groq.uso.tokens}
+        uso = {papel: {"provedor": c.nome, "modelo": c.modelo, "chamadas": c.chamadas, "tokens": c.tokens_sessao,
+                       "requisicoes_dia": c.uso.requisicoes, "desligado": c in self.desligados}
+               for papel, c in (("propositor", self.propositor), ("revisor", self.revisor))}
+        return {**self.stats, **uso}
 
     # --- chamadas ao modelo
     def _perguntar(self, sistema: str, ctx: dict[str, Any]) -> dict[str, Any] | None:
-        if self.desligado:
+        papel = "revisor" if sistema == SISTEMA_REVISOR else "propositor"
+        cliente = self.revisor if papel == "revisor" else self.propositor
+        if cliente in self.desligados:
             return None
         usuario = json.dumps(ctx, ensure_ascii=False, separators=(",", ":"))
-        if self.orcamento is not None and self.groq.tokens_sessao + self.groq.estimar(sistema, usuario) > self.orcamento:
-            self.desligado = True
-            log.warning("orcamento de tokens da execucao esgotado (%d): seguindo so com a politica deterministica",
-                        self.orcamento)
+        if (self.orcamento is not None and cliente is self.propositor
+                and cliente.tokens_sessao + cliente.estimar(sistema, usuario) > self.orcamento):
+            self.desligados.add(cliente)
+            log.warning("orcamento de tokens da execucao esgotado (%d): %s desligado", self.orcamento, cliente.nome)
             return None
+        antes, inicio = cliente.tokens_sessao, time.monotonic()
+        log.info("tick %3d LLM %s: consultando %s (%s)", ctx["tick"], papel, cliente.modelo, cliente.nome)
         try:
-            return self.groq.conversar(sistema, usuario)
+            resposta = cliente.conversar(sistema, usuario)
+            log.info("tick %3d LLM %s: ok em %.1f s, %d tokens (hoje: %d tokens, %d requisicoes)", ctx["tick"],
+                     papel, time.monotonic() - inicio, cliente.tokens_sessao - antes, cliente.uso.tokens,
+                     cliente.uso.requisicoes)
+            self.falhas_seguidas[cliente] = 0
+            return resposta
         except OrcamentoEsgotado as erro:
-            self.desligado = True
-            log.warning("%s: seguindo so com a politica deterministica", erro)
+            self.desligados.add(cliente)
+            log.warning("%s: %s desligado, a politica deterministica continua", erro, cliente.nome)
         except ErroLLM as erro:
             self.stats["falhas_llm"] += 1
-            log.warning("LLM falhou (%s); usando a politica deterministica neste turno", erro)
+            log.warning("LLM %s falhou (%s); seguindo sem ele neste turno", papel, erro)
+            self.falhas_seguidas[cliente] += 1
+            if self.falhas_seguidas[cliente] >= MAX_FALHAS_SEGUIDAS:
+                self.desligados.add(cliente)
+                log.warning("%d falhas seguidas: %s desligado", MAX_FALHAS_SEGUIDAS, cliente.nome)
         return None
 
     # --- decisao do turno
@@ -195,61 +238,89 @@ class CerebroLLM:
         itens = propostas_do_turno(pacote, memoria)
         base = {p.logico: p for p, _, _ in itens}
         base_vetos = {p.logico: v for p, _, v in itens}
-        if not turno_relevante(pacote, base):
-            return [], []
-        self.stats["turnos_relevantes"] += 1
-
         tick, tempestade, caixa = tick_atual(pacote), ler_tempestade(pacote), pacote["economy"]["available_cent"]
         navios = {lid: adaptar_navio(n) for lid, n in pacote["ships"].items()}
         criticas = {lid for lid, p in base.items() if p.papel == "safety" and not base_vetos[lid]}
         ctx = montar_contexto(pacote, memoria, base)
 
-        candidatas = self._propostas_llm(ctx, navios, criticas, tick, tempestade, caixa, memoria)
-        revisoes = self._revisar(ctx, candidatas, navios) if candidatas else {}
+        candidatas: dict[str, dict] = {}
+        if turno_relevante(pacote, base, criticas):
+            self.stats["turnos_relevantes"] += 1
+            candidatas = self._propostas_llm(ctx, navios, criticas, tick, tempestade, caixa, memoria)
+        else:
+            self.stats["turnos_sem_llm"] += 1
+        pareceres = self._revisar(ctx, self._pedidos_de_revisao(pacote, base, base_vetos, criticas, candidatas))
 
         decisoes: list[dict] = []
         propostas: list[Proposta] = []
+
+        def incluir(proposta: Proposta, vetos: list[str], racional: str | None = None,
+                    prefixo: str | None = None) -> list[str]:
+            rev = None if vetos else pareceres.get(_chave(proposta.logico, proposta.acao))
+            if rev and rev["resultado"] == "rejected":
+                vetos = rev["codigos"] or ["LLM_REVIEW_REJECTED"]
+                self.stats["vetos_revisor_llm"] += 1
+            decisoes.append(montar_decisao(proposta, vetos, racional,
+                                           (rev or {}).get("justificativa") or None, prefixo))
+            propostas.append(proposta)
+            return vetos
+
         for lid in pacote["ships"]:
             cand = candidatas.get(lid)
             usar_base = base.get(lid)
             if cand is not None:
-                proposta, vetos, rev_texto, autor = cand["proposta"], cand["vetos"], "", "llm"
-                rev = revisoes.get(cand["id"])
-                if rev and rev["resultado"] == "rejected":
-                    if usar_base is not None and usar_base.acao == proposta.acao and not vetos:
-                        self.stats["veto_llm_ignorado"] += 1   # coincide com a politica ja verificada
-                    else:
-                        vetos = vetos + [c for c in rev["codigos"] if c not in vetos] or ["LLM_REVIEW_REJECTED"]
-                        self.stats["vetos_revisor_llm"] += 1
-                if rev:
-                    rev_texto = rev["justificativa"]
-                if vetos:
+                proposta = cand["proposta"]
+                diverge = usar_base is None or usar_base.acao != proposta.acao
+                if incluir(proposta, cand["vetos"], cand["justificativa"], f"LLM_{proposta.papel}"):
                     self.stats["propostas_vetadas"] += 1
+                    if usar_base is not None and diverge:
+                        self.stats["fallback_politica"] += 1
+                        incluir(usar_base, base_vetos[lid])
                 else:
                     self.stats["propostas_llm_aprovadas"] += 1
-                    if usar_base is not None and usar_base.acao == proposta.acao:
+                    if not diverge:
                         self.stats["iguais_a_politica"] += 1
-                decisoes.append(montar_decisao(proposta, vetos, cand["justificativa"],
-                                               rev_texto or None, prefixo=f"LLM_{proposta.papel}"))
-                propostas.append(proposta)
-                if vetos and usar_base is not None and usar_base.acao != proposta.acao:
-                    self.stats["fallback_politica"] += 1
-                    decisoes.append(montar_decisao(usar_base, base_vetos[lid]))
-                    propostas.append(usar_base)
             elif usar_base is not None:
                 if lid in criticas:
                     self.stats["resposta_critica_deterministica"] += 1
-                decisoes.append(montar_decisao(usar_base, base_vetos[lid]))
-                propostas.append(usar_base)
+                incluir(usar_base, base_vetos[lid])
         return decisoes, propostas
+
+    def _pedidos_de_revisao(self, pacote, base, base_vetos, criticas, candidatas) -> list[dict]:
+        """O que vai ao revisor: divergencias do LLM e, como guarda reserva, acoes aprovadas pelas
+        regras que o servidor nao permite ou de navios com recusa anterior. Resposta critica
+        (E01/E04) permitida pelo servidor nao fica sujeita a veto do LLM."""
+        pedidos: list[dict] = []
+        janela = pacote["meta"].get("window_open")   # janela fechada bloqueia tudo: nao e alerta
+        for lid, navio in pacote["ships"].items():
+            cand, pol = candidatas.get(lid), base.get(lid)
+            diverge = cand is not None and (pol is None or pol.acao != cand["proposta"].acao)
+            opcoes = []
+            if cand is not None and not cand["vetos"]:
+                opcoes.append((cand["proposta"], cand["justificativa"], diverge, False))
+            if pol is not None and not base_vetos[lid] and (cand is None or diverge):
+                opcoes.append((pol, pol.motivo, False, lid in criticas))
+            alerta_usado = False
+            for proposta, justificativa, divergente, critica in opcoes:
+                bloqueio = fora_do_permitido(navio, proposta.acao) if janela else None
+                alerta = bloqueio or (None if critica else self.alertas.get(lid))
+                if divergente or alerta:
+                    pedidos.append({"proposta": proposta, "justificativa": justificativa, "alerta": alerta})
+                    alerta_usado = alerta_usado or bool(alerta)
+            if alerta_usado:
+                self.alertas.pop(lid, None)
+                self.stats["alertas_revisados"] += 1
+        return pedidos
 
     def _propostas_llm(self, ctx, navios, criticas, tick, tempestade, caixa, memoria) -> dict[str, dict]:
         resposta = self._perguntar(SISTEMA_PROPOSITOR, ctx)
         if resposta is None:
             return {}
         saida: dict[str, dict] = {}
-        for item in resposta.get("propostas") or []:
-            if not isinstance(item, dict) or item.get("navio") not in navios or item["navio"] in saida:
+        lista = resposta.get("propostas")
+        for item in lista if isinstance(lista, list) else []:
+            if (not isinstance(item, dict) or not isinstance(item.get("navio"), str)
+                    or item["navio"] not in navios or item["navio"] in saida):
                 self.stats["propostas_descartadas"] += 1
                 continue
             lid, papel = item["navio"], str(item.get("papel") or "")
@@ -269,24 +340,28 @@ class CerebroLLM:
                           "justificativa": str(item.get("justificativa") or "sem justificativa")[:240]}
         return saida
 
-    def _revisar(self, ctx, candidatas: dict[str, dict], navios) -> dict[str, dict]:
-        if self.modo != "completo":
+    def _revisar(self, ctx, pedidos: list[dict]) -> dict[tuple[str, str], dict]:
+        if self.modo != "completo" or not pedidos:
             return {}
-        a_revisar = {lid: c for lid, c in candidatas.items() if not c["vetos"]}
-        if not a_revisar:
-            return {}
+        por_id = {f"p{i}": p for i, p in enumerate(pedidos, 1)}
+        navios = {p["proposta"].logico for p in pedidos}
         pedido = {"tick": ctx["tick"], "eventos": ctx["eventos"], "caixa_livre_cent": ctx["caixa_livre_cent"],
-                  "navios": [n for n in ctx["navios"] if n["navio"] in a_revisar],
-                  "propostas": [{"id": c["id"], "navio": lid, "papel": c["proposta"].papel,
-                                 "revisor": REVISOR[c["proposta"].papel], "acao": c["proposta"].acao,
-                                 "justificativa": c["justificativa"]} for lid, c in a_revisar.items()]}
+                  "navios": [n for n in ctx["navios"] if n["navio"] in navios],
+                  "propostas": [{"id": i, "navio": p["proposta"].logico, "papel": p["proposta"].papel,
+                                 "revisor": REVISOR[p["proposta"].papel], "acao": p["proposta"].acao,
+                                 "justificativa": p["justificativa"],
+                                 **({"alerta": p["alerta"]} if p["alerta"] else {})} for i, p in por_id.items()]}
         resposta = self._perguntar(SISTEMA_REVISOR, pedido)
-        if resposta is None:
-            return {}
-        saida: dict[str, dict] = {}
-        for r in resposta.get("revisoes") or []:
-            if isinstance(r, dict) and r.get("resultado") in ("approved", "rejected") and r.get("id"):
-                codigos = [str(c)[:40] for c in (r.get("codigos") or []) if isinstance(c, str)][:4]
-                saida[str(r["id"])] = {"resultado": r["resultado"], "codigos": codigos,
-                                       "justificativa": str(r.get("justificativa") or "")[:240]}
+        lista = (resposta or {}).get("revisoes")
+        saida: dict[tuple[str, str], dict] = {}
+        for r in lista if isinstance(lista, list) else []:
+            if not isinstance(r, dict) or r.get("resultado") not in ("approved", "rejected"):
+                continue
+            alvo = por_id.get(str(r.get("id")))
+            if alvo is None:
+                continue
+            codigos = r.get("codigos") if isinstance(r.get("codigos"), list) else []
+            saida[_chave(alvo["proposta"].logico, alvo["proposta"].acao)] = {
+                "resultado": r["resultado"], "codigos": [c[:40] for c in codigos if isinstance(c, str)][:4],
+                "justificativa": str(r.get("justificativa") or "")[:240]}
         return saida

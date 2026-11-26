@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
                       help="usa /api/v1/turn/*: sem heartbeats, janela de tempo nem canal em tempo real")
     args.add_argument("--avanco", type=int, default=int(os.getenv("OCEAN_AVANCO") or AVANCO_BASE),
                       help="ticks por turno no modo por turnos (padrao %(default)s)")
-    args.add_argument("--llm", action="store_true", help="agentes LLM (Groq) sobre a politica; exige --modo-turnos")
+    args.add_argument("--llm", action="store_true", help="agentes LLM sobre a politica (Groq propoe, OpenRouter revisa); exige --modo-turnos")
     args.add_argument("--llm-modo", choices=("completo", "proposta"), default="completo",
                       help="completo: LLM propoe e revisa; proposta: so propoe (gasta ~metade dos tokens)")
     args.add_argument("--llm-orcamento", type=int, default=int(os.getenv("OCEAN_LLM_ORCAMENTO") or 120_000),

@@ -11,7 +11,8 @@ from typing import Any
 
 from . import decisao
 from .cliente import ClienteOcean, ErroOcean
-from .groq import ClienteGroq, ErroLLM, Limites, UsoDiario, MODELO_PADRAO, URL_PADRAO
+from .groq import (ClienteLLM, ErroLLM, Limites, UsoDiario, MODELO_PADRAO, MODELO_REVISOR, URL_PADRAO,
+                   URL_REVISOR)
 from .llm_agentes import CerebroDeterministico, CerebroLLM
 from .politicas import Memoria, Proposta
 from .turnos import ClienteTurnos, ErroTurno, ResultadoTurno
@@ -39,16 +40,23 @@ def jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria,
                 placar: dict[str, int], cerebro: Any = None) -> ResultadoTurno:
     """Delibera e envia um turno. Decisao recusada pelo servidor e descartada, nao derruba a rodada."""
     tick = decisao.tick_atual(pacote)
-    decisoes, propostas = (cerebro or CerebroDeterministico()).decidir(pacote, memoria)
-    avanco = 1 if decisao.turno_fino(pacote) else base
-    for tentativa in range(MAX_DESCARTES + 1):
+    cerebro = cerebro or CerebroDeterministico()
+    decisoes, propostas = cerebro.decidir(pacote, memoria)
+    avanco = base
+    for tentativa in range(MAX_DESCARTES + 2):
         try:
             resultado = turnos.enviar(pacote, decisoes, avancar=avanco)
             break
         except ErroTurno as erro:
+            if not decisoes:
+                raise   # nem avancar sem decisoes funciona
+            for e in erro.erros:
+                if isinstance(e, dict) and isinstance(e.get("index"), int) and 0 <= e["index"] < len(decisoes):
+                    cerebro.alertar(decisoes[e["index"]]["ship_id"], str(e.get("message") or erro.codigo))
             restante = _descartar_invalidas(decisoes, propostas, erro)
-            if restante is None or tentativa == MAX_DESCARTES:
-                raise
+            if restante is None or tentativa >= MAX_DESCARTES:
+                log.warning("submit recusado (%s); avancando 1 tick sem decisoes para redeliberar", erro)
+                restante, avanco = ([], []), 1
             placar["descartadas"] += len(decisoes) - len(restante[0])
             decisoes, propostas = restante
     if resultado.recuperado:
@@ -59,6 +67,9 @@ def jogar_turno(turnos: ClienteTurnos, pacote: dict[str, Any], memoria: Memoria,
             if a["status"] == "committed":
                 log.info("tick %3d %-8s %-9s %s [%s]", tick, a["ship_id"], a["action"]["name"],
                          json.dumps(a["action"]["arguments"]), a["proposal_rationale"].split(":")[0])
+            elif a["status"] != "vetoed":
+                log.warning("tick %3d %-8s %s %s: %s", tick, a["ship_id"], a["action"]["name"], a["status"], a["reason"])
+                cerebro.alertar(a["ship_id"], a["reason"])
             placar[a["status"] if a["status"] in ("committed", "vetoed") else "rejected"] += 1
     return resultado
 
@@ -69,11 +80,20 @@ def _criar_cerebro(opcoes: argparse.Namespace) -> CerebroDeterministico | Cerebr
     limites = Limites(rpm=int(os.getenv("GROQ_RPM") or Limites.rpm), tpm=int(os.getenv("GROQ_TPM") or Limites.tpm),
                       tpd=int(os.getenv("GROQ_TPD") or Limites.tpd))
     uso = UsoDiario(Path(os.getenv("GROQ_USO_ARQUIVO") or opcoes.saida / ".groq_uso.json"))
-    groq = ClienteGroq(os.getenv("GROQ_API_KEY", ""), os.getenv("GROQ_MODEL") or MODELO_PADRAO,
-                       os.getenv("GROQ_BASE_URL") or URL_PADRAO, limites, uso)
-    cerebro = CerebroLLM(groq, opcoes.llm_modo, opcoes.llm_orcamento)
-    log.info("LLM %s (%s) | modo %s | orcamento da execucao %s tokens | uso hoje %d/%d tokens", groq.modelo,
-             groq.url, opcoes.llm_modo, opcoes.llm_orcamento, uso.tokens, limites.tpd)
+    propositor = ClienteLLM(os.getenv("GROQ_API_KEY", ""), os.getenv("GROQ_MODEL") or MODELO_PADRAO,
+                            os.getenv("GROQ_BASE_URL") or URL_PADRAO, limites, uso)
+    revisor = None
+    if opcoes.llm_modo == "completo" and os.getenv("OPENROUTER_API_KEY"):
+        revisor = ClienteLLM(
+            os.environ["OPENROUTER_API_KEY"], os.getenv("OPENROUTER_MODEL") or MODELO_REVISOR,
+            os.getenv("OPENROUTER_BASE_URL") or URL_REVISOR,
+            Limites(rpm=int(os.getenv("OPENROUTER_RPM") or 18), tpm=1_000_000, tpd=10_000_000),
+            UsoDiario(Path(os.getenv("OPENROUTER_USO_ARQUIVO") or opcoes.saida / ".openrouter_uso.json")),
+            timeout_s=30.0, nome="OpenRouter", opcionais={"reasoning": {"effort": "low"}},
+            campo_saida="max_tokens", max_saida=4000)   # folga: o raciocinio conta na saida
+    cerebro = CerebroLLM(propositor, opcoes.llm_modo, opcoes.llm_orcamento, revisor)
+    log.info("LLM propositor: %s %s | revisor: %s %s | modo %s | orcamento do propositor %s tokens", propositor.nome,
+             propositor.modelo, cerebro.revisor.nome, cerebro.revisor.modelo, opcoes.llm_modo, opcoes.llm_orcamento)
     return cerebro
 
 
@@ -143,4 +163,5 @@ def executar(opcoes: argparse.Namespace) -> int:
     finally:
         cliente.fechar()
         if isinstance(cerebro, CerebroLLM):
-            cerebro.groq.fechar()
+            cerebro.propositor.fechar()
+            cerebro.revisor.fechar()

@@ -52,6 +52,18 @@ Configuracao adicional do Groq para `--llm`:
 | `GROQ_TPD` | `170000` | Limite local de tokens por dia. |
 | `GROQ_USO_ARQUIVO` | `results/.groq_uso.json` | Arquivo persistente com o consumo diario estimado/retornado pela API. |
 
+Revisor no OpenRouter (usado em `--llm-modo completo` quando a chave existe; sem ela o Groq tambem revisa):
+
+| Variavel | Padrao | Finalidade |
+|---|---|---|
+| `OPENROUTER_API_KEY` | sem padrao | Chave do OpenRouter. |
+| `OPENROUTER_MODEL` | `nvidia/nemotron-3.5-lightning:free` | Modelo revisor. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | URL base da API (nao e o nome do modelo). |
+| `OPENROUTER_RPM` | `18` | Limite local de requisicoes por minuto. |
+| `OPENROUTER_USO_ARQUIVO` | `results/.openrouter_uso.json` | Consumo diario do revisor. |
+
+Cada cliente tem limites, contador e desligamento proprios: se o Groq cair, o revisor continua como guarda reserva, e vice-versa. `--llm-orcamento` vale para o propositor. O endpoint gratuito do Nemotron registra o uso para melhorar produtos da NVIDIA: nao envie dados sigilosos.
+
 Os limites locais do cliente Groq sao configurados com margem abaixo dos limites de plano descritos no codigo. Guarde `GROQ_API_KEY` apenas em variavel de ambiente ou em um `.env` local; nao a publique nem a inclua em commits.
 
 ## Modos de execucao
@@ -93,7 +105,7 @@ Para usar webhook com simulador remoto, o servidor precisa alcancar sua maquina.
 | `--avanco N` | Solicita avancar de 1 a 432 ticks por submissao; padrao `6` (ou `OCEAN_AVANCO`). |
 | `--retomar` / `--reiniciar` | Retoma a rodada ou descarta-a e inicia outra. Sao mutuamente exclusivos. |
 
-O cliente usa `stop_on_events` ao submeter. Alem disso, avanca apenas um tick quando algum navio esta em uma situacao que exige acompanhamento mais fino, como partida, abastecimento ou avaria. Se o servidor rejeitar decisoes especificas, o programa descarta as apontadas nos erros de validacao e tenta submeter as restantes. Se a resposta do submit se perder, consulta o pacote para verificar se o servidor ja avancou, em vez de reenviar a operacao as cegas.
+O cliente usa `stop_on_events` ao submeter. O proprio servidor interrompe o avanco em eventos e transicoes dos navios. Se o servidor rejeitar decisoes especificas, o programa descarta as apontadas nos erros de validacao e tenta submeter as restantes. Se a resposta do submit se perder, consulta o pacote para verificar se o servidor ja avancou, em vez de reenviar a operacao as cegas.
 
 ### Modo por turnos com LLM (Groq)
 
@@ -109,6 +121,8 @@ Configure `GROQ_API_KEY` e execute:
 - `--llm-modo completo` (padrao): o modelo propoe acoes e tambem revisa as propostas elegiveis.
 - `--llm-modo proposta`: o modelo propoe, mas nao faz a chamada LLM de revisao; as regras deterministicas continuam validando as acoes.
 - `--llm-orcamento N`: define o teto de tokens desta execucao; padrao `120000`. Ao atingir o teto, o programa desliga o LLM e continua com a politica deterministica.
+
+O propositor LLM so e consultado quando ha evento novo ou uma proposta nao critica. O revisor LLM so avalia propostas diferentes das da politica e, como guarda reserva, acoes que o servidor nao permite agora ou de navios cuja acao anterior ele recusou; uma resposta critica permitida pelo servidor nao fica sujeita a esse veto. Em 429 persistente (ou `retry-after` acima de 60 s) ou apos 3 falhas seguidas, o LLM e desligado ate o fim da execucao. Cada consulta e cada espera por limite aparecem no log.
 
 As respostas do modelo sao convertidas para o formato de acao esperado e passam por validacao deterministica de estado, limite, tempestade, prazo, combustivel e frequencia de alteracao de velocidade. Respostas invalidas ou propostas vetadas nao passam diretamente como comandos. Eventos criticos de tempestade (E01) e avaria de motor (E04) continuam sendo tratados deterministicamente. Se uma chamada Groq falhar ou o orcamento acabar, o turno segue pela politica deterministica.
 

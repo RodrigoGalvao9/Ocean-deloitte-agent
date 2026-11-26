@@ -1,4 +1,4 @@
-"""Cliente do Groq (API compativel com OpenAI) respeitando os limites do plano gratuito.
+"""Cliente LLM (API compativel com OpenAI: Groq, OpenRouter) respeitando os limites do plano gratuito.
 
 Plano `openai/gpt-oss-120b`: 30 RPM, 1.000 RPD, 8.000 TPM, 200.000 TPD. O gargalo e o TPM/TPD, por isso
 ha um limitador de janela deslizante (requisicoes e tokens por minuto) e um contador diario persistente.
@@ -22,6 +22,8 @@ log = logging.getLogger("ocean")
 
 MODELO_PADRAO = "openai/gpt-oss-120b"
 URL_PADRAO = "https://api.groq.com/openai/v1"
+MODELO_REVISOR = "nvidia/nemotron-3.5-lightning:free"
+URL_REVISOR = "https://openrouter.ai/api/v1"
 SAIDA_ESTIMADA = 500     # tokens de saida (incluindo raciocinio) usados na reserva antes da chamada
 MAX_TENTATIVAS = 3
 
@@ -98,7 +100,10 @@ class Limitador:
                 return registro
             espera = 60 - (agora - min(self._reqs[0] if self._reqs else agora,
                                        self._toks[0][0] if self._toks else agora))
-            self._dormir(max(0.5, min(espera, 60)))
+            espera = max(0.5, min(espera, 60))
+            log.info("LLM aguardando %.0f s pelo limite por minuto (usados %d/%d tokens, %d/%d requisicoes)",
+                     espera, usados, self.limites.tpm, len(self._reqs), self.limites.rpm)
+            self._dormir(espera)
 
     @staticmethod
     def acertar(registro: list, real: int) -> None:
@@ -123,13 +128,18 @@ def extrair_json(texto: str) -> dict[str, Any]:
     return dados
 
 
-class ClienteGroq:
+class ClienteLLM:
     def __init__(self, chave: str, modelo: str = MODELO_PADRAO, url_base: str = URL_PADRAO,
                  limites: Limites | None = None, uso: UsoDiario | None = None, timeout_s: float = 60.0,
                  http: httpx.Client | None = None, relogio: Callable[[], float] = time.monotonic,
-                 dormir: Callable[[float], None] = time.sleep) -> None:
+                 dormir: Callable[[float], None] = time.sleep, nome: str = "Groq",
+                 opcionais: dict[str, Any] | None = None, campo_saida: str = "max_completion_tokens",
+                 max_saida: int = 800) -> None:
+        self.nome, self.campo_saida, self.max_saida = nome, campo_saida, max_saida
         if not chave:
-            raise ErroLLM("GROQ_API_KEY nao configurada")
+            raise ErroLLM(f"chave de API do {nome} nao configurada")
+        if not url_base.startswith(("http://", "https://")):
+            raise ErroLLM(f"URL base do {nome} invalida: {url_base!r} (deve ser http(s); o modelo vai em *_MODEL)")
         self.modelo, self.url = modelo, url_base.rstrip("/")
         self.limites = limites or Limites()
         self.uso = uso or UsoDiario(None)
@@ -137,7 +147,8 @@ class ClienteGroq:
         self._dormir = dormir
         self.http = http or httpx.Client(timeout=timeout_s)
         self._cabecalhos = {"Authorization": f"Bearer {chave}", "Content-Type": "application/json"}
-        self._opcionais: dict[str, Any] = {"reasoning_effort": "low", "response_format": {"type": "json_object"}}
+        self._opcionais: dict[str, Any] = dict(opcionais if opcionais is not None else
+                                               {"reasoning_effort": "low", "response_format": {"type": "json_object"}})
         self.tokens_sessao = self.chamadas = 0
 
     def fechar(self) -> None:
@@ -150,15 +161,15 @@ class ClienteGroq:
     def estimar(*textos: str) -> int:
         return sum(len(t) for t in textos) // 3 + SAIDA_ESTIMADA   # ~3 caracteres/token: conservador
 
-    def conversar(self, sistema: str, usuario: str, max_saida: int = 800) -> dict[str, Any]:
+    def conversar(self, sistema: str, usuario: str) -> dict[str, Any]:
         estimativa = self.estimar(sistema, usuario)
         if not self.cabe(estimativa):
             raise OrcamentoEsgotado(f"orcamento diario de tokens esgotado ({self.uso.tokens}/{self.limites.tpd})")
         registro = self.limitador.reservar(estimativa)
-        corpo = {"model": self.modelo, "temperature": 0.2, "max_completion_tokens": max_saida,
+        corpo = {"model": self.modelo, "temperature": 0.2, self.campo_saida: self.max_saida,
                  "messages": [{"role": "system", "content": sistema}, {"role": "user", "content": usuario}],
                  **self._opcionais}
-        ultimo_erro = "sem tentativas"
+        ultimo_erro, limitadas = "sem tentativas", 0
         for tentativa in range(1, MAX_TENTATIVAS + 1):
             try:
                 resp = self.http.post(f"{self.url}/chat/completions", json=corpo, headers=self._cabecalhos)
@@ -168,25 +179,34 @@ class ClienteGroq:
                 continue
             if resp.status_code == 429:
                 espera = _segundos(resp.headers.get("retry-after"), 5.0)
+                limitadas += 1
+                if espera > 60 or limitadas == MAX_TENTATIVAS:   # cota do provedor: insistir so trava a rodada
+                    raise OrcamentoEsgotado(f"limite do provedor (429, retry-after {espera:.0f} s)")
                 ultimo_erro = f"429 (aguardando {espera:.0f}s)"
-                log.warning("Groq 429: aguardando %.0f s", espera)
+                log.warning("%s 429: aguardando %.0f s", self.nome, espera)
                 self.limitador.penalizar(espera)
                 continue
             if resp.status_code >= 500:
                 ultimo_erro = f"HTTP {resp.status_code}"
                 self._dormir(1.0 * tentativa)
                 continue
-            if resp.status_code == 400 and self._opcionais:
-                log.warning("Groq recusou parametros opcionais (%s); repetindo sem eles", resp.text[:160])
-                for chave in self._opcionais:
-                    corpo.pop(chave, None)
-                self._opcionais = {}
-                ultimo_erro = "HTTP 400"
-                continue
+            if resp.status_code == 400 and "json_validate_failed" not in resp.text:
+                recusados = [c for c in self._opcionais if c in resp.text]   # so o parametro citado
+                if recusados:
+                    log.warning("%s recusou %s; repetindo sem", self.nome, ", ".join(recusados))
+                    for chave in recusados:
+                        corpo.pop(chave, None)
+                        del self._opcionais[chave]
+                    ultimo_erro = "HTTP 400"
+                    continue
             if resp.status_code != 200:
-                raise ErroLLM(f"Groq HTTP {resp.status_code}: {resp.text[:200]}")
-            return self._tratar(resp.json(), registro)
-        raise ErroLLM(f"Groq indisponivel apos {MAX_TENTATIVAS} tentativas: {ultimo_erro}")
+                raise ErroLLM(f"{self.nome} HTTP {resp.status_code}: {resp.text[:200]}")
+            try:
+                dados = resp.json()
+            except ValueError as erro:
+                raise ErroLLM(f"resposta 200 sem JSON: {erro}") from erro
+            return self._tratar(dados, registro)
+        raise ErroLLM(f"{self.nome} indisponivel apos {MAX_TENTATIVAS} tentativas: {ultimo_erro}")
 
     def _tratar(self, dados: dict[str, Any], registro: list) -> dict[str, Any]:
         real = int((dados.get("usage") or {}).get("total_tokens") or registro[1])
@@ -197,9 +217,9 @@ class ClienteGroq:
         try:
             escolha = dados["choices"][0]
             texto = escolha["message"].get("content") or ""
-        except (KeyError, IndexError, TypeError) as erro:
+        except (KeyError, IndexError, TypeError, AttributeError) as erro:
             raise ErroLLM(f"resposta fora do formato esperado: {erro}") from erro
-        if not texto.strip():
+        if not isinstance(texto, str) or not texto.strip():
             raise ErroLLM(f"resposta vazia (finish_reason={escolha.get('finish_reason')}); raciocinio pode ter esgotado a saida")
         return extrair_json(texto)
 

@@ -13,8 +13,6 @@ from .politicas import Memoria, Proposta, Tempestade
 # papel do proponente -> papel do revisor (sempre outro agente; o servidor exige propositor != revisor)
 REVISOR = {"navigation": "safety", "safety": "navigation", "economy": "safety"}
 
-ESTADOS_DE_PARTIDA = ("AT_ORIGIN", "HOLDING", "AT_BUNKER_STATION", "BUNKERING", "WAITING_BERTH")
-
 
 def adaptar_navio(navio: dict[str, Any]) -> dict[str, Any]:
     """Pacote -> o dicionario plano que `politicas` espera (mesmas chaves de /api/v1/state)."""
@@ -35,12 +33,6 @@ def ler_tempestade(pacote: dict[str, Any]) -> Tempestade | None:
 
 def tick_atual(pacote: dict[str, Any]) -> int:
     return pacote["meta"]["current_tick"]
-
-
-def turno_fino(pacote: dict[str, Any]) -> bool:
-    """True quando convem avancar poucos ticks: algum navio ainda parte, abastece ou esta avariado."""
-    return any(n["operational_state"]["ship_state"] in ESTADOS_DE_PARTIDA
-               or n["operational_state"]["e04_active"] for n in pacote["ships"].values())
 
 
 def propostas_do_turno(pacote: dict[str, Any], memoria: Memoria) -> list[tuple[Proposta, dict[str, Any], list[str]]]:
