@@ -1,0 +1,215 @@
+{
+  "result_envelope": {
+    "specversion": "1.0",
+    "contract_version": "1.1.0-pilot",
+    "message_type": "result",
+    "message_id": "msg-result-01a21524-3144-7c79-bec4-60f12b3a1f22",
+    "occurred_at": "2026-11-25T23:57:03.172Z",
+    "recorded_at": "2026-11-25T23:57:03.172Z",
+    "round_id": "round-2026-01",
+    "session_id": "session-team-04-round-2026-01",
+    "team_id": "team-04",
+    "tick": 431,
+    "correlation_id": "result-team-04-round-2026-01",
+    "causation_id": "ledger-seal-round-2026-01",
+    "trace_id": "eba3a5bfba40aa01d6730ee86c3d7f03",
+    "producer": {
+      "type": "independent_scorer",
+      "id": "scorer-01",
+      "version": "1.1.0-pilot"
+    },
+    "subject": {
+      "type": "team",
+      "id": "team-04"
+    },
+    "sequence": 1,
+    "payload": {
+      "ledger_root_sha256": "8cecb30534b3a80bc825fc91b6b094155fdcd82f25fa576ab97ad22f65abaf2f",
+      "replay_root_sha256": "8cecb30534b3a80bc825fc91b6b094155fdcd82f25fa576ab97ad22f65abaf2f",
+      "baseline_version": "1.1.0-pilot",
+      "economy_version": "1.1.0-pilot",
+      "scoring_version": "1.1.0-pilot",
+      "dimensions": {
+        "safety": {
+          "raw": "1.000000",
+          "normalized": "100.0000",
+          "weight": "0.25",
+          "weighted_points": "25.0000"
+        },
+        "economy": {
+          "raw": "96.707339",
+          "normalized": "96.7073",
+          "weight": "0.25",
+          "weighted_points": "24.1768"
+        },
+        "service": {
+          "raw": "1.000000",
+          "normalized": "100.0000",
+          "weight": "0.20",
+          "weighted_points": "20.0000"
+        },
+        "engineering_resilience": {
+          "raw": "1.000000",
+          "normalized": "100.0000",
+          "weight": "0.20",
+          "weighted_points": "20.0000"
+        },
+        "observability_governance": {
+          "raw": "1.000000",
+          "normalized": "100.0000",
+          "weight": "0.10",
+          "weighted_points": "10.0000"
+        }
+      },
+      "score_before_gates": "99.1768",
+      "hard_gates": [],
+      "score_final": "99.1768",
+      "rank_eligible": true,
+      "autonomous_operation": "1.0000",
+      "human_interventions": 0,
+      "multi_agent_proof": {
+        "compliant": true,
+        "evidence_root_sha256": "e1d24eb7a1e724a708d07ba44bd3e1b44d69ba27ad128880e3b09bd68f178e2c",
+        "eligible_agents": [
+          "team-04-guardiao",
+          "team-04-navegador"
+        ],
+        "heartbeat_coverage": {
+          "team-04-guardiao": "1.0000",
+          "team-04-navegador": "1.0000",
+          "team-04-economista": "1.0000"
+        },
+        "eligible_ticks_by_agent": {
+          "team-04-guardiao": 432,
+          "team-04-navegador": 432,
+          "team-04-economista": 432
+        },
+        "valid_heartbeat_ticks_by_agent": {
+          "team-04-guardiao": 432,
+          "team-04-navegador": 432,
+          "team-04-economista": 432
+        },
+        "committed_transactions_by_agent": {
+          "team-04-guardiao": 18,
+          "team-04-navegador": 17,
+          "team-04-economista": 1
+        },
+        "ships_by_agent": {
+          "team-04-guardiao": [
+            "ship-04-s1",
+            "ship-04-s2",
+            "ship-04-s3",
+            "ship-04-s4"
+          ],
+          "team-04-navegador": [
+            "ship-04-s1",
+            "ship-04-s2",
+            "ship-04-s3",
+            "ship-04-s4"
+          ],
+          "team-04-economista": [
+            "ship-04-s4"
+          ]
+        },
+        "credited_chains": 18,
+        "churn_rejected": 0
+      },
+      "platform_exclusions": [],
+      "replay_status": "exact_match",
+      "rounding": "half_even_4_decimals_from_unrounded_dimensions_at_display_and_total"
+    },
+    "integrity": {
+      "payload_sha256": "9ce9dea52f0fbfa71cc4acd9ea392497d399376417a57e5454402e6735aa6837",
+      "schema_id": "https://ocean.local/schemas/result.schema.json"
+    }
+  },
+  "summary": {
+    "baseline_version": "1.1.0-pilot",
+    "scenario_version": "1.1.0-pilot",
+    "economy_version": "1.1.0-pilot",
+    "scoring_version": "1.1.0-pilot",
+    "ships": {
+      "S1-FAROL": {
+        "unloading_completed_tick": 359,
+        "deadline_tick": 390,
+        "fuel_consumed_milli": 39171,
+        "fuel_close_milli": 40829,
+        "cargo_delivered_milli": 10000000,
+        "cargo_quality_millionth": 1000000
+      },
+      "S2-MARE": {
+        "unloading_completed_tick": 383,
+        "deadline_tick": 414,
+        "fuel_consumed_milli": 53669,
+        "fuel_close_milli": 46331,
+        "cargo_delivered_milli": 13500000,
+        "cargo_quality_millionth": 1000000
+      },
+      "S3-CORAL": {
+        "unloading_completed_tick": 347,
+        "deadline_tick": 378,
+        "fuel_consumed_milli": 56730,
+        "fuel_close_milli": 58270,
+        "cargo_delivered_milli": 17000000,
+        "cargo_quality_millionth": 1000000
+      },
+      "S4-ATLAS": {
+        "unloading_completed_tick": 407,
+        "deadline_tick": 426,
+        "fuel_consumed_milli": 88995,
+        "fuel_close_milli": 61005,
+        "cargo_delivered_milli": 20000000,
+        "cargo_quality_millionth": 1000000,
+        "repair_started_tick": 293,
+        "repair_completed_tick": 305,
+        "E05_applied": false
+      }
+    },
+    "fleet": {
+      "fuel_consumed_milli": 238565,
+      "fuel_close_milli": 206435,
+      "cargo_delivered_milli": 60500000,
+      "revenue_cent": 594900000,
+      "opening_cost_cent": 467200000,
+      "fuel_purchased_cost_cent": 305000,
+      "crew_cost_cent": 7682400,
+      "maintenance_cost_cent": 2250000,
+      "port_cost_cent": 2600000,
+      "repair_cost_cent": 2400000,
+      "penalty_cost_cent": 0,
+      "total_cost_cent": 482437400,
+      "margin_cent": 112462600,
+      "cash_final_cent": 612462600,
+      "fuel_memorandum_cent": 12388134,
+      "fuel_memorandum_by_ship_cent": {
+        "S1-FAROL": 2449740,
+        "S2-MARE": 2779860,
+        "S3-CORAL": 3496200,
+        "S4-ATLAS": 3662334
+      },
+      "fuel_intensity_t_per_1000_t_nm": "0.005275652"
+    },
+    "score": {
+      "safety": "100.0000",
+      "economy": "96.7073",
+      "economy_raw_7": "96.7073388",
+      "service": "100.0000",
+      "engineering_resilience": "100.0000",
+      "observability_governance": "100.0000",
+      "total_raw_7": "99.1768347",
+      "total": "99.1768"
+    },
+    "human_interventions": 0,
+    "economic_default": false,
+    "replay_status": "exact_match"
+  },
+  "commit_reveal": null,
+  "ledger_verification": {
+    "valid": true,
+    "entry_count": 6113,
+    "raw_count": 6113,
+    "merkle_root_sha256": "8cecb30534b3a80bc825fc91b6b094155fdcd82f25fa576ab97ad22f65abaf2f"
+  },
+  "status": "completed",
+  "finalized": true
+}
